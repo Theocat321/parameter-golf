@@ -4,6 +4,15 @@
 Going from recent to first
 ---
 
+### Depth Recurrence (EXPERIMENTAL)
+  - 6 unique blocks run 2 times = 12 effective layers, half the stored params
+  - Learnable pass_gate [2, 512] scales input differently per pass so model can tell them apart
+  - U-Net skip connections reset each pass (collected and consumed within each loop)
+  - Tunable: NUM_LAYERS=8 RECURRENCE=2 (16 eff.) or NUM_LAYERS=4 RECURRENCE=3 (12 eff.)
+  - Risk: shared weights less expressive than unique — no leaderboard submission has tried this
+  - All top submissions went the opposite direction: more unique layers via better compression
+  - Need to A/B test against NUM_LAYERS=11 RECURRENCE=1 to see if it actually helps
+
 ### SmearGate
   - One parameter per dimension (512 floats), initialized to zero (sigmoid(0) = 0.5 = equal mix)
   - Applied after RMS norm, before transformer blocks
