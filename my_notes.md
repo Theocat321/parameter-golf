@@ -4,6 +4,13 @@
 Going from recent to first
 ---
 
+### SmearGate
+  - One parameter per dimension (512 floats), initialized to zero (sigmoid(0) = 0.5 = equal mix)
+  - Applied after RMS norm, before transformer blocks
+  - `x = (1 - gate) * current_token + gate * previous_token`
+  - Gives the model cheap 1-token context before attention kicks in
+  - Gate param added to scalar optimizer, listed in control tensor patterns so it stays fp32
+
 ### BigramHash                                                                                                
   - 10240 buckets, 128-dim embeddings projected to 512 (model_dim)              
   - XOR hash of consecutive token pairs
