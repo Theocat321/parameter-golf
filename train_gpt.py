@@ -61,7 +61,7 @@ class Hyperparameters:
 
     # Model shape.
     vocab_size = int(os.environ.get("VOCAB_SIZE", 1024))
-    num_layers = int(os.environ.get("NUM_LAYERS", 11))
+    num_layers = int(os.environ.get("NUM_LAYERS", 6))
     num_kv_heads = int(os.environ.get("NUM_KV_HEADS", 4))
     model_dim = int(os.environ.get("MODEL_DIM", 512))
     num_heads = int(os.environ.get("NUM_HEADS", 8))
@@ -90,6 +90,9 @@ class Hyperparameters:
     # QAT: simulate int4 quantization noise on MLP weights during training
     qat_enabled = bool(int(os.environ.get("QAT_ENABLED", "1")))
     qat_clip_range = int(os.environ.get("QAT_CLIP_RANGE", 7))  # int4: [-8, 7]
+
+    # Depth recurrence: run num_layers unique blocks this many times
+    recurrence = int(os.environ.get("RECURRENCE", 2))
 
     # BigramHash embedding
     bigram_vocab_size = int(os.environ.get("BIGRAM_VOCAB_SIZE", 10240))
@@ -301,7 +304,7 @@ CONTROL_TENSOR_NAME_PATTERNS = tuple(
     pattern
     for pattern in os.environ.get(
         "CONTROL_TENSOR_NAME_PATTERNS",
-        "attn_scale,attn_scales,mlp_scale,mlp_scales,resid_mix,resid_mixes,q_gain,skip_weight,skip_weights,smear,bigram.scale",
+        "attn_scale,attn_scales,mlp_scale,mlp_scales,resid_mix,resid_mixes,q_gain,skip_weight,skip_weights,smear,bigram.scale,pass_gate",
     ).split(",")
     if pattern
 )
@@ -746,6 +749,7 @@ class GPT(nn.Module):
         qk_gain_init: float,
         bigram_vocab_size: int = 0,
         bigram_dim: int = 128,
+        recurrence: int = 1,
     ):
         super().__init__()
         if logit_softcap <= 0.0:
@@ -753,9 +757,12 @@ class GPT(nn.Module):
         self.tie_embeddings = tie_embeddings
         self.tied_embed_init_std = tied_embed_init_std
         self.logit_softcap = logit_softcap
+        self.recurrence = recurrence
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
         self.bigram = BigramHashEmbedding(bigram_vocab_size, bigram_dim, model_dim) if bigram_vocab_size > 0 else None
         self.smear = SmearGate(model_dim)
+        # Effective depth = num_layers * recurrence
+        # U-Net skip connections operate within each recurrence pass
         self.num_encoder_layers = num_layers // 2
         self.num_decoder_layers = num_layers - self.num_encoder_layers
         self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
@@ -773,6 +780,11 @@ class GPT(nn.Module):
                 for i in range(num_layers)
             ]
         )
+        # Per-pass learnable gate so the model can distinguish recurrence passes
+        if recurrence > 1:
+            self.pass_gate = nn.Parameter(torch.ones(recurrence, model_dim, dtype=torch.float32))
+        else:
+            self.pass_gate = None
         self.final_norm = RMSNorm()
         self.lm_head = None if tie_embeddings else CastedLinear(model_dim, vocab_size, bias=False)
         if self.lm_head is not None:
@@ -793,16 +805,20 @@ class GPT(nn.Module):
         x = F.rms_norm(x, (x.size(-1),))
         x = self.smear(x)
         x0 = x
-        skips: list[Tensor] = []
 
-        # First half stores skips; second half reuses them in reverse order.
-        for i in range(self.num_encoder_layers):
-            x = self.blocks[i](x, x0)
-            skips.append(x)
-        for i in range(self.num_decoder_layers):
-            if skips:
-                x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
-            x = self.blocks[self.num_encoder_layers + i](x, x0)
+        for r in range(self.recurrence):
+            # Scale input per-pass so the model can distinguish recurrence iterations
+            if self.pass_gate is not None:
+                x = x * self.pass_gate[r].to(dtype=x.dtype)[None, None, :]
+
+            skips: list[Tensor] = []
+            for i in range(self.num_encoder_layers):
+                x = self.blocks[i](x, x0)
+                skips.append(x)
+            for i in range(self.num_decoder_layers):
+                if skips:
+                    x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
+                x = self.blocks[self.num_encoder_layers + i](x, x0)
 
         x = self.final_norm(x).reshape(-1, x.size(-1))
         targets = target_ids.reshape(-1)
@@ -929,6 +945,7 @@ def main() -> None:
         qk_gain_init=args.qk_gain_init,
         bigram_vocab_size=args.bigram_vocab_size,
         bigram_dim=args.bigram_dim,
+        recurrence=args.recurrence,
     ).to(device).bfloat16()
     for module in base_model.modules():
         if isinstance(module, CastedLinear):
@@ -962,6 +979,8 @@ def main() -> None:
     if base_model.skip_weights.numel() > 0:
         scalar_params.append(base_model.skip_weights)
     scalar_params.append(base_model.smear.gate)
+    if base_model.pass_gate is not None:
+        scalar_params.append(base_model.pass_gate)
     if base_model.bigram is not None:
         scalar_params.append(base_model.bigram.scale)
         if base_model.bigram.proj is not None:
