@@ -1,6 +1,6 @@
 numpy
 tqdm
-torch
+torch>=2.5.0
 huggingface-hub
 kernels
 setuptools
