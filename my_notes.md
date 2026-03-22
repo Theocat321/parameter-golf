@@ -4,6 +4,14 @@
 Going from recent to first
 ---
 
+### Depth Recurrence — FAILED
+  - Tested NUM_LAYERS=8 RECURRENCE=2 (16 effective layers) on 1xH100
+  - BPB 1.3976 vs 1.3477 for 11L unique — worse
+  - Slower per step (678ms vs 579ms) and used more memory (19.7GB vs 13.9GB)
+  - Running same weights twice doubles compute graph, doesn't help quality
+  - Unique layers are simply more expressive per byte at this scale
+  - Don't revisit this approach
+
 ### SmearGate
   - One parameter per dimension (512 floats), initialized to zero (sigmoid(0) = 0.5 = equal mix)
   - Applied after RMS norm, before transformer blocks
