@@ -2,6 +2,7 @@
 set -e
 
 cd /workspace/parameter-golf
+git pull
 
 NUM_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())")
 echo "Detected $NUM_GPUS GPU(s)"
