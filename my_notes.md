@@ -4,7 +4,13 @@
 Going from recent to first
 ---
 
-### 
+### BigramHash                                                                                                
+  - 10240 buckets, 128-dim embeddings projected to 512 (model_dim)              
+  - XOR hash of consecutive token pairs
+  - Learned scale starting at 0.05                                              
+  - Weights initialized to zero so it gradually learns                          
+  - Embedding goes to token optimizer (Adam), projection to Muon with the other matrix params                                                                 
+  - Quantized as int8 in the export  
 
 ### Quicker wins
 
