@@ -8,6 +8,7 @@
 | run-001 | 2026-03-22 | 1.3477 | 14.04 | 11L unique, int4 QAT, all quick wins | 1xH100, 1037 steps — undertrained |
 | run-002 | 2026-03-22 | 1.4019 | 10.27 | 8L x2 recurrence, int4 QAT, all quick wins | 1xH100, 885 steps — WORSE, slower, kill this approach |
 | run-003 | 2026-03-22 | 1.4781 | 13.67 | 11L + SWA, int4 QAT, all quick wins | 1xH100, 1038 steps — SWA hurt post-quant BPB (1.3479 pre-quant vs 1.4781 post-quant) |
+| run-004 | 2026-03-22 | 1.3344 | 13.89 | 11L, int4 QAT, sliding window eval, no SWA | 1xH100, 896 steps — best so far! Sliding window eval helped a lot (1.3710 standard vs 1.3344) |
 
 ---
 
@@ -88,6 +89,22 @@ TRAIN_SEQ_LEN=1024
   - Post-quant BPB (1.4781) much worse — averaged early undertrained checkpoints don't survive int4 quantization
   - SWA needs a fully trained model with proper warmdown to work. On 1xH100 with only 1038 steps it's harmful
   - **Verdict: keep SWA enabled for 8xH100 runs, but it's noise on 1xH100**
+
+### Run: run-004 (sliding window eval, no SWA)
+**Date:** 2026-03-22
+**Branch:** main
+**GPU:** 1xH100
+**Config:** Same as run-001 + sliding window eval (stride=64, batch_seqs=32), SWA_ENABLED=0, TRAIN_LOG_EVERY=1
+**Result:** BPB=1.3344 (post-quant sliding window), 1.3710 (standard eval)  |  Size=13.89 MB
+**Train time:** 600s (hit wallclock cap)
+**Steps:** 896/20000 @ 670ms/step
+**Peak memory:** 13906 MiB
+**Observations:**
+  - Best BPB so far: 1.3344 (post-quant with sliding window)
+  - Sliding window eval gave 0.037 BPB improvement over standard eval for free — just better measurement
+  - Fewer steps than run-001 (896 vs 1037) due to slower step time (670ms vs 579ms) — likely torch.compile overhead from code changes
+  - wandb tracking working, loss curve trending down steadily
+  - 13.89MB with ~2MB headroom still available
 
 ---
 
