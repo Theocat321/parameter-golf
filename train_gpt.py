@@ -22,6 +22,12 @@ from pathlib import Path
 import numpy as np
 import sentencepiece as spm
 import torch
+
+try:
+    import wandb
+    _WANDB = True
+except ImportError:
+    _WANDB = False
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch import Tensor, nn
@@ -94,6 +100,11 @@ class Hyperparameters:
     # BigramHash embedding
     bigram_vocab_size = int(os.environ.get("BIGRAM_VOCAB_SIZE", 10240))
     bigram_dim = int(os.environ.get("BIGRAM_DIM", 128))
+
+    # SWA: average checkpoints from late training
+    swa_enabled = bool(int(os.environ.get("SWA_ENABLED", "0")))
+    swa_start_frac = float(os.environ.get("SWA_START_FRAC", 0.4))
+    swa_every = int(os.environ.get("SWA_EVERY", 50))
 
 # -----------------------------
 # MUON OPTIMIZER 
@@ -1018,6 +1029,14 @@ def main() -> None:
     )
     log0(f"seed:{args.seed}")
 
+    # wandb init (rank 0 only)
+    if _WANDB and master_process:
+        wandb.init(
+            project="parameter-golf",
+            name=args.run_id,
+            config={k: v for k, v in vars(args.__class__).items() if not k.startswith("_") and not callable(v)},
+        )
+
     # -----------------------------
     # DATA LOADER & MODEL WARMUP
     # -----------------------------
@@ -1075,6 +1094,8 @@ def main() -> None:
 
     training_time_ms = 0.0
     stop_after_step: int | None = None
+    swa_state: dict[str, Tensor] | None = None
+    swa_count = 0
     torch.cuda.synchronize()
     t0 = time.perf_counter()
 
@@ -1102,6 +1123,8 @@ def main() -> None:
                 f"step:{step}/{args.iterations} val_loss:{val_loss:.4f} val_bpb:{val_bpb:.4f} "
                 f"train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms / max(step, 1):.2f}ms"
             )
+            if _WANDB and master_process:
+                wandb.log({"val_loss": val_loss, "val_bpb": val_bpb, "train_time_ms": training_time_ms}, step=step)
             torch.cuda.synchronize()
             t0 = time.perf_counter()
 
@@ -1144,15 +1167,30 @@ def main() -> None:
 
         step += 1
         approx_training_time_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
+
+        # SWA: collect checkpoints during warmdown
+        if args.swa_enabled and scale < args.swa_start_frac and step % args.swa_every == 0:
+            if swa_state is None:
+                swa_state = {name: t.detach().cpu().clone() for name, t in base_model.state_dict().items()}
+                swa_count = 1
+                log0(f"swa:start step:{step}")
+            else:
+                for name, t in base_model.state_dict().items():
+                    swa_state[name] += t.detach().cpu()
+                swa_count += 1
+
         should_log_train = (
             args.train_log_every > 0
             and (step <= 10 or step % args.train_log_every == 0 or stop_after_step is not None)
         )
         if should_log_train:
+            tl = train_loss.item()
             log0(
-                f"step:{step}/{args.iterations} train_loss:{train_loss.item():.4f} "
+                f"step:{step}/{args.iterations} train_loss:{tl:.4f} "
                 f"train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms / step:.2f}ms"
             )
+            if _WANDB and master_process:
+                wandb.log({"train_loss": tl, "lr_scale": scale, "step_avg_ms": approx_training_time_ms / step}, step=step)
 
         # Needed to sync whether we've reached the wallclock cap.
         reached_cap = max_wallclock_ms is not None and approx_training_time_ms >= max_wallclock_ms
@@ -1168,11 +1206,19 @@ def main() -> None:
         f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB"
     )
 
+    # Apply SWA if collected
+    if args.swa_enabled and swa_state is not None and swa_count > 1:
+        log0(f"swa:applying averaged {swa_count} checkpoints")
+        current_state = base_model.state_dict()
+        avg_state = {
+            name: (tensor / swa_count).to(dtype=current_state[name].dtype)
+            for name, tensor in swa_state.items()
+        }
+        base_model.load_state_dict(avg_state, strict=True)
+
     # -----------------------------
     # SERIALIZATION + ROUNDTRIP VALIDATION
     # -----------------------------
-    # Save the raw state (useful for debugging/loading in PyTorch directly), then always produce
-    # the compressed int8+zlib artifact and validate the round-tripped weights.
 
     if master_process:
         torch.save(base_model.state_dict(), "final_model.pt")
@@ -1234,6 +1280,10 @@ def main() -> None:
         f"eval_time:{1000.0 * (time.perf_counter() - t_qeval):.0f}ms"
     )
     log0(f"final_mixed_quant_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
+
+    if _WANDB and master_process:
+        wandb.log({"final_bpb": q_val_bpb, "final_loss": q_val_loss, "model_size_mb": quant_file_bytes / 1e6})
+        wandb.finish()
 
     if distributed:
         dist.destroy_process_group()

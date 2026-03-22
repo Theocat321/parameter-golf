@@ -7,6 +7,7 @@
 |--------|------|-----|-----------|--------|-------|
 | run-001 | 2026-03-22 | 1.3477 | 14.04 | 11L unique, int4 QAT, all quick wins | 1xH100, 1037 steps — undertrained |
 | run-002 | 2026-03-22 | 1.4019 | 10.27 | 8L x2 recurrence, int4 QAT, all quick wins | 1xH100, 885 steps — WORSE, slower, kill this approach |
+| run-003 | 2026-03-22 | 1.4781 | 13.67 | 11L + SWA, int4 QAT, all quick wins | 1xH100, 1038 steps — SWA hurt post-quant BPB (1.3479 pre-quant vs 1.4781 post-quant) |
 
 ---
 
@@ -71,6 +72,22 @@ TRAIN_SEQ_LEN=1024
   - 19.7GB memory vs 13.9GB — recurrence doubles the compute graph through same weights
   - Only upside: 10.27MB size (lots of headroom) but that doesn't help if quality is worse
   - **Verdict: depth recurrence is a dead end. Unique layers are better.**
+
+### Run: run-003 (SWA experiment)
+**Date:** 2026-03-22
+**Branch:** swa-experiment
+**GPU:** 1xH100
+**Config:** Same as run-001 + SWA_ENABLED=1, SWA_START_FRAC=0.4, SWA_EVERY=50
+**Result:** BPB=1.4781 (post-quant), 1.3479 (pre-quant)  |  Size=13.67 MB
+**Train time:** 600s (hit wallclock cap)
+**Steps:** 1038/20000 @ 579ms/step
+**Peak memory:** 13910 MiB
+**SWA checkpoints averaged:** 20
+**Observations:**
+  - Pre-quant BPB (1.3479) nearly identical to run-001 (1.3477) — SWA didn't help or hurt training
+  - Post-quant BPB (1.4781) much worse — averaged early undertrained checkpoints don't survive int4 quantization
+  - SWA needs a fully trained model with proper warmdown to work. On 1xH100 with only 1038 steps it's harmful
+  - **Verdict: keep SWA enabled for 8xH100 runs, but it's noise on 1xH100**
 
 ---
 
